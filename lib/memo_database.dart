@@ -1,6 +1,6 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
-import 'memo_model.dart';
+import 'memo.dart';
 
 class MemoDatabase {
   static final MemoDatabase instance = MemoDatabase._init();
@@ -22,8 +22,9 @@ class MemoDatabase {
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 2, // データベースバージョンを2に設定
       onCreate: _createDB,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -32,11 +33,31 @@ class MemoDatabase {
     const textType = 'TEXT NOT NULL';
 
     await db.execute('''
-CREATE TABLE memos (
-  id $idType,
-  content $textType
-  )
-''');
+    CREATE TABLE memos (
+      id $idType,
+      content $textType
+      )
+    ''');
+
+    if (version >= 2) {
+      await db.execute('''
+      CREATE TABLE deleted_memos (
+        id $idType,
+        content $textType
+      )
+      ''');
+    }
+  }
+
+  Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2 && newVersion >= 2) {
+      await db.execute('''
+      CREATE TABLE deleted_memos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content TEXT NOT NULL
+      )
+      ''');
+    }
   }
 
   Future<Memo> create(Memo memo) async {
@@ -63,11 +84,46 @@ CREATE TABLE memos (
     }
   }
 
+  Future<Memo> readDeletedMemo(int id) async {
+    final db = await instance.database;
+
+    final maps = await db.query(
+      'deleted_memos',
+      columns: ['id', 'content'],
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+
+    if (maps.isNotEmpty) {
+      return Memo.fromMap(maps.first);
+    } else {
+      throw Exception('ID $id not found');
+    }
+  }
+
+  Future<int> deleteFromDeleted(int id) async {
+    final db = await instance.database;
+    return await db.delete(
+      'deleted_memos',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future<List<Memo>> readAllMemos() async {
     final db = await instance.database;
 
     final orderBy = 'id ASC';
     final result = await db.query('memos', orderBy: orderBy);
+
+    return result.map((json) => Memo.fromMap(json)).toList();
+  }
+
+  Future<List<Memo>> readAllDeletedMemos() async {
+    final db = await instance.database;
+
+    final orderBy = 'id ASC';
+    final result = await db.query('deleted_memos', orderBy: orderBy);
 
     return result.map((json) => Memo.fromMap(json)).toList();
   }
@@ -86,6 +142,9 @@ CREATE TABLE memos (
   Future<int> delete(int id) async {
     final db = await instance.database;
 
+    final memo = await readMemo(id);
+
+    await db.insert('deleted_memos', memo.toMap());  // 削除前に削除済みメモを保存
     return await db.delete(
       'memos',
       where: 'id = ?',
